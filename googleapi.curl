@@ -1,0 +1,83 @@
+#!/bin/bash
+
+# === CONFIG SECTION ===
+source .env
+
+# Prompt asking for input for delegating the emails
+read -p "Enter the GSuite email of the person GIVING access (delegator): " DELEGATOR_EMAIL
+read -p "Enter the GSuite email of the person RECEIVING access (delegate): " DELEGATE_EMAIL
+
+
+SCOPE="https://www.googleapis.com/auth/gmail.settings.sharing https://mail.google.com/ https://www.googleapis.com/auth/gmail.modify https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.settings.basic https://www.googleapis.com/auth/gmail.metadata"
+
+# === building da JWT  ===
+PRIVATE_KEY=$(jq -r .private_key "$SERVICE_ACCOUNT_JSON")
+CLIENT_EMAIL=$(jq -r .client_email "$SERVICE_ACCOUNT_JSON")
+
+HEADER='{"alg":"RS256","typ":"JWT"}'
+IAT=$(date +%s)
+EXP=$((IAT + 3600))
+
+CLAIMS=$(cat <<EOF
+{
+  "iss": "$CLIENT_EMAIL",
+  "scope": "$SCOPE",
+  "aud": "https://oauth2.googleapis.com/token",
+  "exp": $EXP,
+  "iat": $IAT,
+  "sub": "$DELEGATOR_EMAIL"
+}
+EOF
+)
+
+HEADER_B64=$(echo -n "$HEADER" | openssl base64 -A | tr '+/' '-_' | tr -d '=')
+CLAIMS_B64=$(echo -n "$CLAIMS" | openssl base64 -A | tr '+/' '-_' | tr -d '=')
+JWT_BODY="${HEADER_B64}.${CLAIMS_B64}"
+
+echo "$PRIVATE_KEY" > private.pem
+SIGNATURE=$(echo -n "$JWT_BODY" | openssl dgst -sha256 -sign private.pem | openssl base64 -A | tr '+/' '-_' | tr -d '=')
+JWT="${JWT_BODY}.${SIGNATURE}"
+
+ACCESS_TOKEN=$(curl -s -X POST https://oauth2.googleapis.com/token \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion=${JWT}" | jq -r .access_token)
+
+# === adds info instead of null when  ===
+if [[ "$ACCESS_TOKEN" == "null" || -z "$ACCESS_TOKEN" ]]; then
+  echo " Failed to generate access token. Check your scope or domain-wide delegation config."
+  exit 1
+fi
+
+echo " Access token generated."
+echo "[INFO] Acting as: $DELEGATOR_EMAIL → Delegating to: $DELEGATE_EMAIL"
+
+# ===  ===
+echo " Adding delegate..."
+ADD_RESPONSE=$(curl -s -X POST \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"delegateEmail\": \"$DELEGATE_EMAIL\"}" \
+  "https://gmail.googleapis.com/gmail/v1/users/$DELEGATOR_EMAIL/settings/delegates")
+
+echo " Add response:"
+echo "$ADD_RESPONSE" | jq .
+
+# === TOOLS ===
+echo ""
+echo "  Run the following to list current delegates:"
+echo "curl -s -H \"Authorization: Bearer \$ACCESS_TOKEN\" \"https://gmail.googleapis.com/gmail/v1/users/$DELEGATOR_EMAIL/settings/delegates\" | jq"
+
+echo ""
+echo "  To REMOVE this delegate:"
+echo "curl -X DELETE -H \"Authorization: Bearer \$ACCESS_TOKEN\" \"https://gmail.googleapis.com/gmail/v1/users/$DELEGATOR_EMAIL/settings/delegates/$DELEGATE_EMAIL\""
+
+echo " Complete. Check Gmail UI or run the list command above to confirm."
+
+
+
+
+
+
+
+
+
